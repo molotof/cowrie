@@ -10,207 +10,17 @@ import os
 from zope.interface import implementer
 
 import twisted
-from twisted.conch import avatar, interfaces as conchinterfaces
-from twisted.conch.ssh import session
+from twisted.conch.interfaces import ISFTPFile, ISFTPServer
 from twisted.conch.ssh import filetransfer
-from twisted.conch.ssh import forwarding
 from twisted.conch.ssh.filetransfer import FXF_READ, FXF_WRITE, FXF_APPEND, FXF_CREAT, FXF_TRUNC, FXF_EXCL
 import twisted.conch.ls
-from twisted.python import log, components
-from twisted.conch.ssh.common import getNS
+from twisted.python import log
 
-from cowrie.core import pwd
-from cowrie.core import protocol
+import cowrie.core.pwd as pwd
 
 
-
-class HoneyPotSSHSession(session.SSHSession):
-    """
-    This is an SSH channel that's used for SSH sessions
-    """
-
-    def __init__(self, *args, **kw):
-        session.SSHSession.__init__(self, *args, **kw)
-        #self.__dict__['request_auth_agent_req@openssh.com'] = self.request_agent
-
-
-    def request_env(self, data):
-        """
-        """
-        name, rest = getNS(data)
-        value, rest = getNS(rest)
-        if rest:
-            raise ValueError("Bad data given in env request")
-        log.msg(eventid='KIPP0013', format='request_env: %(name)s=%(value)s',
-            name=name, value=value)
-        # Environment variables come after shell or before exec command
-        if self.session:
-            self.session.environ[name] = value
-        return 0
-
-
-    def request_agent(self, data):
-        """
-        """
-        log.msg('request_agent: %s' % (repr(data),))
-        return 0
-
-
-    def request_x11_req(self, data):
-        """
-        """
-        log.msg('request_x11: %s' % (repr(data),))
-        return 0
-
-
-    def closed(self):
-        """
-        This is reliably called on session close/disconnect and calls the avatar
-        """
-        session.SSHSession.closed(self)
-
-
-    def sendEOF(self):
-        """
-        Utility function to request to send EOF for this session
-        """
-        self.conn.sendEOF(self)
-
-
-    def sendClose(self):
-        """
-        Utility function to request to send close for this session
-        """
-        self.conn.sendClose(self)
-
-
-    def channelClosed(self):
-        """
-        """
-        log.msg("Called channelClosed in SSHSession")
-
-
-
-@implementer(conchinterfaces.IConchUser)
-class CowrieUser(avatar.ConchUser):
-    """
-    """
-
-    def __init__(self, username, server):
-        avatar.ConchUser.__init__(self)
-        self.username = username
-        self.server = server
-        self.cfg = self.server.cfg
-
-        self.channelLookup.update(
-            {"session": HoneyPotSSHSession,
-             "direct-tcpip": CowrieOpenConnectForwardingClient})
-
-        try:
-            pwentry = pwd.Passwd(self.cfg).getpwnam(self.username)
-            self.uid = pwentry["pw_uid"]
-            self.gid = pwentry["pw_gid"]
-            self.home = pwentry["pw_dir"]
-        except:
-            self.uid = 1001
-            self.gid = 1001
-            self.home = '/home'
-
-        # Sftp support enabled only when option is explicitly set
-        try:
-            if (self.cfg.get('honeypot', 'sftp_enabled') == "true"):
-                self.subsystemLookup['sftp'] = filetransfer.FileTransferServer
-        except:
-            pass
-
-
-    def logout(self):
-        """
-        """
-        log.msg('avatar {} logging out'.format(self.username))
-
-
-
-@implementer(conchinterfaces.ISession)
-class SSHSessionForCowrieUser:
-    """
-    """
-
-    def __init__(self, avatar, reactor=None):
-        """
-        Construct an C{SSHSessionForCowrieUser}.
-
-        @param avatar: The L{CowrieUser} for whom this is an SSH session.
-        @param reactor: An L{IReactorProcess} used to handle shell and exec
-            requests. Uses the default reactor if None.
-        """
-        self.protocol = None
-        self.avatar = avatar
-        self.server = avatar.server
-        self.cfg = avatar.cfg
-        self.uid = avatar.uid
-        self.gid = avatar.gid
-        self.username = avatar.username
-        self.environ = {'PATH': '/bin:/usr/bin:/usr/local/bin',
-            'LOGNAME': self.username,
-            'USER': self.username,
-            'HOME': self.avatar.home}
-
-
-    def openShell(self, processprotocol):
-        """
-        """
-        self.protocol = protocol.LoggingServerProtocol(
-            protocol.HoneyPotInteractiveProtocol, self)
-        self.protocol.makeConnection(processprotocol)
-        processprotocol.makeConnection(session.wrapProtocol(self.protocol))
-
-
-    def getPty(self, terminal, windowSize, attrs):
-        """
-        """
-        self.environ['TERM'] = terminal
-        log.msg(eventid='KIPP0010', width=windowSize[0], height=windowSize[1],
-            format='Terminal Size: %(width)s %(height)s')
-        self.windowSize = windowSize
-        return None
-
-
-    def execCommand(self, processprotocol, cmd):
-        """
-        """
-        self.protocol = protocol.LoggingServerProtocol(
-            protocol.HoneyPotExecProtocol, self, cmd)
-        self.protocol.makeConnection(processprotocol)
-        processprotocol.makeConnection(session.wrapProtocol(self.protocol))
-
-
-    def closed(self):
-        """
-        this is reliably called on both logout and disconnect
-        we notify the protocol here we lost the connection
-        """
-        if self.protocol:
-            self.protocol.connectionLost("disconnected")
-            self.protocol = None
-
-
-    def eofReceived(self):
-        """
-        """
-        if self.protocol:
-            self.protocol.eofReceived()
-
-
-    def windowChanged(self, windowSize):
-        """
-        """
-        self.windowSize = windowSize
-
-
-
-@implementer(conchinterfaces.ISFTPFile)
-class CowrieSFTPFile:
+@implementer(ISFTPFile)
+class CowrieSFTPFile(object):
     """
     """
 
@@ -276,7 +86,7 @@ class CowrieSFTPFile:
         """
         self.bytes_written += len(data)
         if self.bytesReceivedLimit and self.bytes_written > self.bytesReceivedLimit:
-            log.msg(eventid='KIPP0015', format='Data upload limit reached')
+            log.msg(eventid='COW0015', format='Data upload limit reached')
             raise filetransfer.SFTPError( filetransfer.FX_FAILURE, "Quota exceeded" )
         self.sftpserver.fs.lseek(self.fd, offset, os.SEEK_SET)
         self.sftpserver.fs.write(self.fd, data)
@@ -296,7 +106,7 @@ class CowrieSFTPFile:
 
 
 
-class CowrieSFTPDirectory:
+class CowrieSFTPDirectory(object):
     """
     """
     def __init__(self, server, directory):
@@ -320,7 +130,10 @@ class CowrieSFTPDirectory:
             raise StopIteration
         else:
             s = self.server.fs.lstat(os.path.join(self.dir, f))
-            longname = twisted.conch.ls.lsLine(f, s)
+            s2 = self.server.fs.lstat(os.path.join(self.dir, f))
+            s2.st_uid = pwd.Passwd(self.server.avatar.cfg).getpwuid(s.st_uid)["pw_name"]
+            s2.st_gid = pwd.Group(self.server.avatar.cfg).getgrgid(s.st_gid)["gr_name"]
+            longname = twisted.conch.ls.lsLine(f, s2)
             attrs = self.server._getAttrs(s)
             return (f, longname, attrs)
 
@@ -332,8 +145,8 @@ class CowrieSFTPDirectory:
 
 
 
-@implementer(conchinterfaces.ISFTPServer)
-class SFTPServerForCowrieUser:
+@implementer(ISFTPServer)
+class SFTPServerForCowrieUser(object):
     """
     """
 
@@ -464,7 +277,7 @@ class SFTPServerForCowrieUser:
     def realPath(self, path):
         """
         """
-        log.msg("SFTP realPath: %s" % (path,))
+        #log.msg("SFTP realPath: %s" % (path,))
         return self.fs.realpath(self._absPath(path))
 
 
@@ -473,39 +286,3 @@ class SFTPServerForCowrieUser:
         """
         raise NotImplementedError
 
-
-
-components.registerAdapter(SFTPServerForCowrieUser, CowrieUser, conchinterfaces.ISFTPServer)
-components.registerAdapter(SSHSessionForCowrieUser, CowrieUser, session.ISession)
-
-
-def CowrieOpenConnectForwardingClient(remoteWindow, remoteMaxPacket, data, avatar):
-    """
-    """
-    remoteHP, origHP = twisted.conch.ssh.forwarding.unpackOpen_direct_tcpip(data)
-    log.msg(eventid='KIPP0014', format='direct-tcp connection request to %(dst_ip)s:%(dst_port)s',
-            dst_ip=remoteHP[0], dst_port=remoteHP[1])
-    return CowrieConnectForwardingChannel(remoteHP,
-       remoteWindow=remoteWindow, remoteMaxPacket=remoteMaxPacket,
-       avatar=avatar)
-
-
-
-class CowrieConnectForwardingChannel(forwarding.SSHConnectForwardingChannel):
-    """
-    """
-    def channelOpen(self, specificData):
-        """
-        """
-        pass
-
-
-    def dataReceived(self, data):
-        """
-        """
-        log.msg(eventid='KIPP0015',
-            format='direct-tcp forward to %(dst_ip)s:%(dst_port)s with data %(data)s',
-            dst_ip=self.hostport[0], dst_port=self.hostport[1], data=repr(data))
-        self._close("Connection refused")
-
-# vim: set et sw=4 et:

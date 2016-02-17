@@ -38,13 +38,13 @@ from twisted.python import log
 
 from cowrie.core import protocol
 from cowrie.core import server
-from cowrie.core import ssh
+from cowrie.core import avatar
 
 import sys
 import gc
 
 @implementer(twisted.cred.portal.IRealm)
-class HoneyPotRealm:
+class HoneyPotRealm(object):
     """
     """
 
@@ -70,9 +70,9 @@ class HoneyPotRealm:
 	#    log.msg( "Refer: %s" % repr( gc.get_referrers(self.servers[i])))
 
         if conchinterfaces.IConchUser in interfaces:
-            return interfaces[0], \
-                ssh.CowrieUser(avatarId, server.CowrieServer(self.cfg)), lambda:None
+            serv = server.CowrieServer(self.cfg)
+            user = avatar.CowrieUser(avatarId, serv)
+            return interfaces[0], user, user.logout
         else:
             raise Exception("No supported interfaces found.")
-
 
